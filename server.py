@@ -3,12 +3,13 @@ import sys
 import glob
 import subprocess
 import json
-import base64
+import time
 
 # server configs
 HOST='localhost'
 PORT=2728
 FILE_DIR='htdocs'
+BUFFER_SIZE=8192 # 8KB
 
 # socket server
 server = None
@@ -43,18 +44,26 @@ def formatPath(path):
 
     return path
 
-def formatResponse(content_type = "text/plain", status_code = 200, status_message = "OK", data = ""):
+def formatResponse(method = "GET", path = "/", content_type = "text/plain", status_code = 200, status_message = "OK", data = "", document = False):
     # set status
-    res = f"HTTP/1.1 {status_code} {status_message}\r\n"
+    header = f"HTTP/1.1 {status_code} {status_message}\r\n"
     # set response content type
-    res += f"Content-Type: {content_type}\r\n"
+    header += f"Content-Type: {content_type}\r\n"
     # set response content length
-    res += f"Content-Length: {len(data)}\r\n"
-    # set response data
-    res += f"\r\n{data}"
+    header += f"Content-Length: {len(data)}\r\n\r\n"
+
+    # encode the header content
+    header = header.encode('utf-8')
     
-    # return the response string
-    return res
+    # if not a document encode the data
+    if(not document):
+        data = data.encode('utf-8')
+
+    # print on terminal
+    log(method=method, content_type='text/plain', status_code=status_code, path=path)
+    
+    # return the encoded headers
+    return [header, data]
 
 def getExtension(path):
     # split the path by '.'
@@ -63,6 +72,24 @@ def getExtension(path):
     # get the last string from the list
     return strings[-1]
 
+def log(method, content_type, status_code, path):
+    # format path
+    path = path.replace('\\', '/')
+
+    # create string with colors
+    if(status_code == 404):
+        method = f"\33[91m[{method}]\033[0m" + "\t"
+        status_code = f"\33[101m {status_code} \033[0m" + "\t"
+    else:
+        method = f"\33[32m[{method}]\033[0m" + "\t"
+        status_code = f"\33[104m {status_code} \033[0m" + "\t"
+
+    content_type = f"\33[90m{content_type}\033[0m" + "\t"
+    path = f"{path}" + "\t"
+
+    # print the content
+    print("{0:<8} {1:<8} {2:<8} {3:<20}".format(method, content_type, status_code, path))
+
 def init():
     global server
 
@@ -70,6 +97,9 @@ def init():
     # AF_INET means the address family ipv4
     # SOCK_STREAM means connection-oriented TCP protocol
     server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+
+    # set server buffer size
+    server.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, BUFFER_SIZE)
 
     # bind the socket to localhost on given port
     server.bind((HOST, PORT))
@@ -82,8 +112,9 @@ def init():
     # keep the server active
     while True:
         client_socket, client_address = server.accept()
-        
         [method, path] = formatRequest(client_socket)
+
+        client_socket.settimeout(30)
 
         # if method or path is not found continue to the next
         if not method or not path:
@@ -92,7 +123,6 @@ def init():
         # if the method is get::proceed
         if method == 'GET':
             path = formatPath(path)
-            response = formatResponse()
             
             if len(glob.glob(path)) > 0:
                 # set the found file path
@@ -101,6 +131,8 @@ def init():
                 extension = getExtension(path)
                 # get the content type and execution type
                 content_type, execution_type = content_types.get(extension, ["text/plain", None])
+                # set is document to False
+                is_document = False
                 
                 if execution_type:
                     # execute the file (eg: php) and get the output
@@ -109,29 +141,43 @@ def init():
                     # read the file as binary
                     with open(path, 'rb') as file:
                         output = file.read()
+                    # set is document True to format the response
+                    is_document = True
                 else:
                     # read the file as text
                     with open(path, 'r') as text:
                         output = text.read()
-
+            
                 # format the response with data
-                response = formatResponse(
+                [header, data] = formatResponse(
+                    method=method,
+                    path=path,
                     content_type=content_type,
                     status_code=200,
                     status_message="OK",
-                    data=output
+                    data=output,
+                    document=is_document
                 )
             else:
                 # format the response as not found 
-                response = formatResponse(
+                [header, data] = formatResponse(
+                    method=method,
+                    path=path,
                     status_code=404,
                     status_message="Not Found",
                     data="Not Found"
                 )
-
-            # serve the response
-            client_socket.sendall(response.encode('utf-8'))
-
+            
+            # serve the response header
+            client_socket.sendall(header)
+            # serve the response data in chunks of buffer size
+            for i in range(0, len(data), BUFFER_SIZE):
+                # extract the required chunk size
+                chunk = data[i:i + BUFFER_SIZE]
+                # send chunk
+                client_socket.sendall(chunk)
+        
+        time.sleep(0.1)
         # close client socket connection   
         client_socket.close()
             
