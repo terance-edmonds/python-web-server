@@ -1,11 +1,12 @@
 import socket
-import sys
 import glob
 import subprocess
 import json
 import urllib.parse
 import os
 from threading import Thread
+import re
+import http.client
 
 # server configs
 HOST='localhost'
@@ -21,38 +22,96 @@ server = None
 content_types_file = open('content-types.json')
 content_types = json.load(content_types_file)
 
-def formatRequest(client_socket):
-    # get data from http client request (max 1KB)
-    # format into a string
-    request = client_socket.recv(1024).decode('utf-8')
+def getBody(request):
+    matches = re.findall(r'Content-Disposition: form-data; name="([^"]+)"\s+([^-]+)', request)
+    data = {}
+    # iterate through the matches and store them in the dictionary
+    for match in matches:
+        name = match[0].strip()
+        value = match[1].strip()
+        data[name] = value
 
+    return data
+
+def getParams(route):
+    parsed_url = urllib.parse.urlparse(route)
+    query_params = urllib.parse.parse_qs(parsed_url.query)
+    data = {}
+    # iterate through and store them in the dictionary
+    for key, values in query_params.items():
+        if(len(values) == 1): values = values[0]
+        data[key] = values
+
+    return data
+
+def loadRequest(client_socket):
+    # get data from http client request (max 1KB) as chunks
+    # format into a string
+    request = ""
+    content_length = 0
+    received_length = 4 # \r\n\r\n char length
+    while True:
+        chunk = client_socket.recv(4096).decode('utf-8')
+        
+        # get the content length if available
+        match = re.search(r'Content-Length:\s*(\d+)', chunk)
+        if(match): content_length = int(match.group(1))
+        # split the chunk 
+        chunk_split = chunk.split("\r\n\r\n", 1)
+        
+        # add the length of body content
+        for ch in chunk_split:
+            if("Content-Disposition: form-data;" in ch):
+                received_length += len(ch)
+
+        if not chunk:
+            break  # no more data is being sent by the client
+        
+        # add to request data
+        request += chunk
+
+        print(received_length, content_length, end="\n")
+        # if content length is satisfied exit the request data collection
+        if(received_length >= content_length):
+            break
+    
+    return request
+
+
+def formatRequest(request):
     if not request:
-        return [None, None]
+        return [None, None, None, None]
 
     # split the request string into lines
     lines = request.split('\r\n')
     # get the first line and split by space
     data = lines[0].split()
-
     method = data[0].upper()
     # parse the url
-    route = urllib.parse.unquote_plus(data[1])
+    route = urllib.parse.unquote_plus(data[1]) if(len(data) > 1) else None
+    # get body data if available
+    body = getBody(request)
+    # get parameter data if available
+    params = getParams(route)
 
-    return [method, route]
+    return [method, route, body, params]
 
 def formatPath(route):
+    route_split = route.split("?")
+    route_path = route_split[0]
+
     # if the path has no file set it to index file
-    if route[-1] == '/':
-        route = '/index.*'
+    if route_path[-1] == '/':
+        route_path = '/index.*'
     
     # set to relative file path
-    route = f"{FILE_DIR}{route}"
+    route_path = f"{FILE_DIR}{route_path}"
 
     # if this is a directory search for a index file
-    if(os.path.isdir(route)):
-        route = f'{route}/index.*'
+    if(os.path.isdir(route_path)):
+        route_path = f'{route_path}/index.*'
 
-    return route
+    return route_path
 
 def formatResponse(client_address, method = "GET", route = "/", content_type = "text/plain", status_code = 200, status_message = "OK", data = "", document = False):
     # set status
@@ -60,7 +119,9 @@ def formatResponse(client_address, method = "GET", route = "/", content_type = "
     # set response content type
     header += f"Content-Type: {content_type}\r\n"
     # set response content length
-    header += f"Content-Length: {len(data)}\r\n\r\n"
+    header += f"Content-Length: {len(data)}\r\n"
+    # set the empty line
+    header += "\r\n"
 
     # encode the header content
     header = header.encode('utf-8')
@@ -70,7 +131,7 @@ def formatResponse(client_address, method = "GET", route = "/", content_type = "
         data = data.encode('utf-8')
 
     # print on terminal
-    log(client_address=client_address, method=method, content_type='text/plain', status_code=status_code, route=route)
+    log(client_address=client_address, method=method, content_type=content_type, status_code=status_code, route=route)
     
     # return the encoded headers
     return [header, data]
@@ -82,7 +143,20 @@ def getExtension(route):
     # get the last string from the list
     return strings[-1]
 
+def formatDictToString(body, params):
+    string = ""
+    for key, value in params.items():
+        string += f"$_GET[\"{key}\"]=\"{value}\";\r\n"
+
+    for key, value in body.items():
+        string += f"$_POST[\"{key}\"]=\"{value}\";\r\n"
+
+    return string
+
 def log(client_address, method, content_type, status_code, route):
+    if(method not in["GET", "POST"]):
+        return
+    
     # format path
     route = route.replace('\\', '/')
 
@@ -103,66 +177,81 @@ def log(client_address, method, content_type, status_code, route):
 
 def on_client(client_socket, client_address):
     while True:
-        [method, route] = formatRequest(client_socket)
+        # connect all request chunks
+        request = loadRequest(client_socket)
+        [method, route, body, params] = formatRequest(request)
 
         # if method or path is not found continue to the next
         if not method or not route:
             break
         
         # if the method is get::proceed
-        if method == 'GET':
-            route = formatPath(route)
+        route = formatPath(route)
+        
+        if len(glob.glob(route)) > 0:
+            # set the found file path
+            route = glob.glob(route)[0]
+            # extract the file extension
+            extension = getExtension(route)
+            # get the content type and execution type
+            content_type, execution_type, is_document = content_types.get(extension, ["text/plain", None, False])
+            
+            if execution_type:
+                with open(route, 'r+') as file:
+                    # read the file content
+                    content = file.read()
+                    # set the pointer back to the start of the file
+                    file.seek(0, 0)
 
-            if len(glob.glob(route)) > 0:
-                # set the found file path
-                route = glob.glob(route)[0]
-                # extract the file extension
-                extension = getExtension(route)
-                # get the content type and execution type
-                content_type, execution_type, is_document = content_types.get(extension, ["text/plain", None, False])
-                
-                if execution_type:
-                    # execute the file (eg: php) and get the output
-                    output = subprocess.check_output([execution_type, route], shell=True, universal_newlines=True)
-                elif is_document:
-                    # read the file as binary
-                    with open(route, 'rb') as file:
-                        output = file.read()
-                else:
-                    # read the file as text
-                    with open(route, 'r') as text:
-                        output = text.read()
-            
-                # format the response with data
-                [header, data] = formatResponse(
-                    client_address=client_address,
-                    method=method,
-                    route=route,
-                    content_type=content_type,
-                    status_code=200,
-                    status_message="OK",
-                    data=output,
-                    document=is_document
-                )
+                    # prepare form data
+                    form_data = formatDictToString(body, params)
+                    # append the form content
+                    content = content.replace("<?php", f"<?php \r\n{form_data}\r\n")
+                    # execute the command and pass the script content as stdin
+                    process = subprocess.Popen([execution_type], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True)
+                    # communicate with the process, passing the PHP script content as input
+                    output, error = process.communicate(input=content)
+
+                    if(error): print(f"error: {error}")
+            elif is_document:
+                # read the file as binary
+                with open(route, 'rb') as file:
+                    output = file.read()
             else:
-                # format the response as not found 
-                [header, data] = formatResponse(
-                    client_address=client_address,
-                    method=method,
-                    route=route,
-                    status_code=404,
-                    status_message="Not Found",
-                    data="Not Found"
-                )
+                # read the file as text
+                with open(route, 'r') as text:
+                    output = text.read()
             
-            # serve the response header
-            client_socket.sendall(header)
-            # serve the response data in chunks of buffer size
-            for i in range(0, len(data), BUFFER_SIZE):
-                # extract the required chunk size
-                chunk = data[i:i + BUFFER_SIZE]
-                # send chunk
-                client_socket.sendall(chunk)
+            # format the response with data
+            [header, data] = formatResponse(
+                client_address=client_address,
+                method=method,
+                route=route,
+                content_type=content_type,
+                status_code=200,
+                status_message="OK",
+                data=output,
+                document=is_document
+            )
+        else:
+            # format the response as not found 
+            [header, data] = formatResponse(
+                client_address=client_address,
+                method=method,
+                route=route,
+                status_code=404,
+                status_message="Not Found",
+                data="Not Found"
+            )
+        
+        # serve the response header
+        client_socket.sendall(header)
+        # serve the response data in chunks of buffer size
+        for i in range(0, len(data), BUFFER_SIZE):
+            # extract the required chunk size
+            chunk = data[i:i + BUFFER_SIZE]
+            # send chunk
+            client_socket.sendall(chunk)
         
     # close client socket connection   
     client_socket.close()

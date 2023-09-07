@@ -6,8 +6,8 @@ This is a simple web server developed with python sockets. Server is compatible 
 
 | Type      | Route                                                               |
 | --------- | ------------------------------------------------------------------- |
-| **.php**  | [/ or /index.php](http://localhost:2728)                            |
-| **.html** | [/files/sample.html](http://localhost:2728/files/sample.html)       |
+| **.html** | [/](http://localhost:2728/files/sample.html)                        |
+| **.php**  | [/contact.php](http://localhost:2728/contact.php)                   |
 | **.css**  | [/style.css](http://localhost:2728/style.css)                       |
 | **.js**   | [/script.js](http://localhost:2728/script.js)                       |
 | **.jpg**  | [/images/parallax1.jpg](http://localhost:2728/images/parallax1.jpg) |
