@@ -2,7 +2,7 @@
 
 This is a simple web server developed with python sockets. Server is compatible of serving various file types and also supports serving multiple clients at once.
 
-The server also support simple GET and POST submissions.
+The server also support simple GET and POST form submissions.
 
 ## Example links
 
