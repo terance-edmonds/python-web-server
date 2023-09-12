@@ -241,7 +241,7 @@ def log(client_address, method, content_type, status_code, route):
         client_address, method, content_type, status_code, route))
 
 
-def on_client(client_socket, client_address):
+def onClient(client_socket, client_address):
     while True:
         # connect all request chunks
         request = loadRequest(client_socket)
@@ -283,6 +283,9 @@ def on_client(client_socket, client_address):
                     output, error = process.communicate(input=content)
 
                     if (error):
+                        output = error
+                        content_type = "text/plain"
+
                         print(f"error: {error}")
             elif is_document:
                 # read the file as binary
@@ -352,7 +355,7 @@ def init():
         client_socket, client_address = server.accept()
 
         # create the thread
-        thread = Thread(target=on_client, args=(client_socket, client_address))
+        thread = Thread(target=onClient, args=(client_socket, client_address))
         # daemon is true to make sure all processes stop when program exits
         thread.daemon = True
         # start the thread
